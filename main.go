@@ -17,9 +17,10 @@ type TTSMessage struct {
 }
 
 type ScriptState struct {
-	Name   string `json:"name"`
-	GUID   string `json:"guid"`
-	Script string `json:"script"`
+	Name   string  `json:"name"`
+	GUID   string  `json:"guid"`
+	Script string  `json:"script"`
+	UI     *string `json:"ui,omitempty"`
 }
 
 const (
@@ -117,11 +118,11 @@ func handleTTSMessage(message *TTSMessage) {
 	switch message.MessageID {
 	case MESSAGE_TYPE_NEW_OBJECT:
 		log.Print("New object message received")
-		createOrUpdateLuaFiles(message.ScriptStates)
+		createOrUpdateScriptFiles(message.ScriptStates)
 	case MESSAGE_TYPE_LOAD_GAME:
 		log.Print("Load game message received")
 		cleanScriptFiles()
-		createOrUpdateLuaFiles(message.ScriptStates)
+		createOrUpdateScriptFiles(message.ScriptStates)
 	}
 }
 
@@ -141,22 +142,47 @@ func cleanScriptFiles() {
 	}
 }
 
-func createOrUpdateLuaFiles(luaScripts []*ScriptState) {
-	for _, luaScript := range luaScripts {
-		filename := objectDataToFilename(luaScript)
+func createOrUpdateScriptFiles(scriptFiles []*ScriptState) {
+	for _, scriptFile := range scriptFiles {
+		filename := objectDataToFilename(scriptFile)
 		log.Printf("Creating or updating lua file %s", filename)
 
 		luaFilepath := filepath.Join(scriptsDir, filename+".lua")
-		log.Printf("Attempting to create file at filepath: %s", luaFilepath)
+		xmlFilepath := filepath.Join(scriptsDir, filename+".xml")
+		log.Printf("Attempting to create lua file at filepath: %s", luaFilepath)
+		log.Printf("Attempting to create xml file at filepath: %s", xmlFilepath)
+
+		// Lua
 		file, err := os.Create(luaFilepath)
 		if err != nil {
 			log.Printf("Could not create or update file '%s': %v", filename, err)
 			continue
 		}
 
-		_, err = file.WriteString(luaScript.Script)
+		_, err = file.WriteString(scriptFile.Script)
 		if err != nil {
 			log.Printf("Could not write script data to file '%s': %v", filename, err)
+		}
+
+		err = file.Close()
+		if err != nil {
+			log.Printf("Could not close file '%s': %v", filename, err)
+		}
+
+		// XML
+		if scriptFile.UI == nil || *scriptFile.UI == "" {
+			continue
+		}
+
+		file, err = os.Create(xmlFilepath)
+		if err != nil {
+			log.Printf("Could not create or update file '%s': %v", filename, err)
+			continue
+		}
+
+		_, err = file.WriteString(*scriptFile.UI)
+		if err != nil {
+			log.Printf("Could not write UI data to file '%s': %v", filename, err)
 		}
 
 		err = file.Close()
