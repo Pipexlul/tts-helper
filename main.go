@@ -115,9 +115,29 @@ func handleTTSMessage(message *TTSMessage) {
 	}
 
 	switch message.MessageID {
-	case MESSAGE_TYPE_NEW_OBJECT, MESSAGE_TYPE_LOAD_GAME:
-		log.Print("New game or new object message received")
+	case MESSAGE_TYPE_NEW_OBJECT:
+		log.Print("New object message received")
 		createOrUpdateLuaFiles(message.ScriptStates)
+	case MESSAGE_TYPE_LOAD_GAME:
+		log.Print("Load game message received")
+		cleanScriptFiles()
+		createOrUpdateLuaFiles(message.ScriptStates)
+	}
+}
+
+func cleanScriptFiles() {
+	files, err := os.ReadDir(scriptsDir)
+	if err != nil {
+		log.Printf("Could not read scripts directory: %v", err)
+		return
+	}
+
+	for _, file := range files {
+		log.Printf("Removing file '%s'", file.Name())
+		err := os.Remove(filepath.Join(scriptsDir, file.Name()))
+		if err != nil {
+			log.Printf("Could not remove file '%s': %v", file.Name(), err)
+		}
 	}
 }
 
