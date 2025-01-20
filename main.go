@@ -61,14 +61,33 @@ func main() {
 
 	log.Printf("Listening on %s", ln.Addr().String())
 
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			log.Printf("Could not accept connection: %v", err)
-			continue
-		}
-		go handleIDEConnection(conn)
+	ttsConn, err := net.Dial("tcp4", "127.0.0.1:"+TTS_PORT)
+	if err != nil {
+		log.Fatalf("Could not connect to TTS: %v", err)
 	}
+	defer func(conn net.Conn) {
+		err := conn.Close()
+		if err != nil {
+			log.Printf("Could not close TTS connection: %v", err)
+		}
+	}(ttsConn)
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				log.Printf("Could not accept connection: %v", err)
+				continue
+			}
+			go handleIDEConnection(conn)
+		}
+	}()
+
+	go handleTTSConnection(ttsConn)
+}
+
+func handleTTSConnection(ttsConn net.Conn) {
+
 }
 
 func handleIDEConnection(conn net.Conn) {
