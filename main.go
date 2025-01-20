@@ -6,14 +6,31 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 )
+
+type IDEMessageObjectScript struct {
+	GUID   string `json:"guid"`
+	Script string `json:"script"`
+}
+
+type IDEMessage struct {
+	MessageID     int                     `json:"messageID"`
+	ScriptStates  []*ScriptState          `json:"scriptStates,omitempty"`
+	CustomMessage string                  `json:"customMessage,omitempty"`
+	ObjectScript  *IDEMessageObjectScript `json:",omitempty,inline"`
+}
 
 type TTSMessage struct {
 	MessageID    int            `json:"messageID"`
 	ScriptStates []*ScriptState `json:"scriptStates,omitempty"`
 	Message      string         `json:"message,omitempty"`
+}
+
+type SendDataBody struct {
+	Operation int `json:"operation"`
 }
 
 type ScriptState struct {
@@ -24,17 +41,23 @@ type ScriptState struct {
 }
 
 const (
-	PORT_IDE = "39998"
-	TTS_PORT = "39999"
+	REST_PORT = "39997"
+	PORT_IDE  = "39998"
+	TTS_PORT  = "39999"
 
-	MESSAGE_TYPE_NEW_OBJECT          = 0
-	MESSAGE_TYPE_LOAD_GAME           = 1
-	MESSAGE_TYPE_PRINT_MSG           = 2
-	MESSAGE_TYPE_ERROR_MSG           = 3
-	MESSAGE_TYPE_CUSTOM_MSG          = 4
-	MESSAGE_TYPE_RETURN_MSG          = 5
-	MESSAGE_TYPE_USER_SAVED          = 6
-	MESSAGE_TYPE_USER_CREATED_OBJECT = 7
+	TTS_MESSAGE_TYPE_NEW_OBJECT          = 0
+	TTS_MESSAGE_TYPE_LOAD_GAME           = 1
+	TTS_MESSAGE_TYPE_PRINT_MSG           = 2
+	TTS_MESSAGE_TYPE_ERROR_MSG           = 3
+	TTS_MESSAGE_TYPE_CUSTOM_MSG          = 4
+	TTS_MESSAGE_TYPE_RETURN_MSG          = 5
+	TTS_MESSAGE_TYPE_USER_SAVED          = 6
+	TTS_MESSAGE_TYPE_USER_CREATED_OBJECT = 7
+
+	IDE_MESSAGE_GET_ALL             = 0
+	IDE_MESSAGE_SEND_SCRIPT_DATA    = 1
+	IDE_MESSAGE_SEND_CUSTOM_MESSAGE = 2
+	IDE_MESSAGE_EXEC_LUA_CODE       = 3
 )
 
 var (
@@ -61,33 +84,67 @@ func main() {
 
 	log.Printf("Listening on %s", ln.Addr().String())
 
-	ttsConn, err := net.Dial("tcp4", "127.0.0.1:"+TTS_PORT)
-	if err != nil {
-		log.Fatalf("Could not connect to TTS: %v", err)
-	}
-	defer func(conn net.Conn) {
-		err := conn.Close()
-		if err != nil {
-			log.Printf("Could not close TTS connection: %v", err)
-		}
-	}(ttsConn)
+	go handleIDEConnections(ln)
 
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				log.Printf("Could not accept connection: %v", err)
-				continue
-			}
-			go handleIDEConnection(conn)
-		}
-	}()
-
-	go handleTTSConnection(ttsConn)
+	startRESTAPI()
 }
 
-func handleTTSConnection(ttsConn net.Conn) {
+func startRESTAPI() {
+	http.HandleFunc("/send", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Only POST method is allowed", http.StatusMethodNotAllowed)
+			return
+		}
 
+		var requestBody SendDataBody
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+			return
+		}
+
+		ttsConn, err := net.Dial("tcp4", "127.0.0.1:"+TTS_PORT)
+		if err != nil {
+			log.Printf("Could not open connection to TTS: %v", err)
+			http.Error(w, "Could not open connection to TTS", http.StatusInternalServerError)
+			return
+		}
+
+		ideMessage := IDEMessage{
+			MessageID: requestBody.Operation,
+		}
+		ideMessageBytes, err := json.Marshal(ideMessage)
+		if err != nil {
+			log.Printf("Failed to serialize message: %v", err)
+			http.Error(w, "Failed to serialize message", http.StatusInternalServerError)
+			return
+		}
+
+		_, err = ttsConn.Write(ideMessageBytes)
+		if err != nil {
+			log.Printf("Failed to send message to TTS: %v", err)
+			http.Error(w, "Failed to send message to TTS", http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("Message sent to TTS"))
+	})
+
+	log.Printf("Starting REST API on port %s", REST_PORT)
+	if err := http.ListenAndServe(":"+REST_PORT, nil); err != nil {
+		log.Fatalf("Failed to start REST API: %v", err)
+	}
+}
+
+func handleIDEConnections(ln net.Listener) {
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			log.Printf("Could not accept connection: %v", err)
+			continue
+		}
+		go handleIDEConnection(conn)
+	}
 }
 
 func handleIDEConnection(conn net.Conn) {
@@ -135,10 +192,10 @@ func handleTTSMessage(message *TTSMessage) {
 	}
 
 	switch message.MessageID {
-	case MESSAGE_TYPE_NEW_OBJECT:
+	case TTS_MESSAGE_TYPE_NEW_OBJECT:
 		log.Print("New object message received")
 		createOrUpdateScriptFiles(message.ScriptStates)
-	case MESSAGE_TYPE_LOAD_GAME:
+	case TTS_MESSAGE_TYPE_LOAD_GAME:
 		log.Print("Load game message received")
 		cleanScriptFiles()
 		createOrUpdateScriptFiles(message.ScriptStates)
