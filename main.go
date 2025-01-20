@@ -1,20 +1,23 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log"
 	"net"
-	"strings"
+	"os"
+	"path/filepath"
 )
 
 type TTSMessage struct {
-	MessageID    string        `json:"messageID"`
-	ScriptStates []ScriptState `json:"scriptStates,omitempty"`
-	Message      string        `json:"message,omitempty"`
+	MessageID    int            `json:"messageID"`
+	ScriptStates []*ScriptState `json:"scriptStates,omitempty"`
+	Message      string         `json:"message,omitempty"`
 }
 
 type ScriptState struct {
+	Name   string `json:"name"`
 	GUID   string `json:"guid"`
 	Script string `json:"script"`
 }
@@ -22,9 +25,28 @@ type ScriptState struct {
 const (
 	PORT_IDE = "39998"
 	TTS_PORT = "39999"
+
+	MESSAGE_TYPE_NEW_OBJECT          = 0
+	MESSAGE_TYPE_LOAD_GAME           = 1
+	MESSAGE_TYPE_PRINT_MSG           = 2
+	MESSAGE_TYPE_ERROR_MSG           = 3
+	MESSAGE_TYPE_CUSTOM_MSG          = 4
+	MESSAGE_TYPE_RETURN_MSG          = 5
+	MESSAGE_TYPE_USER_SAVED          = 6
+	MESSAGE_TYPE_USER_CREATED_OBJECT = 7
+)
+
+var (
+	scriptsDir string
 )
 
 func main() {
+	scriptsDir = filepath.Join(filepath.Dir(os.Args[0]), "scripts")
+	err := os.MkdirAll(scriptsDir, os.ModePerm)
+	if err != nil {
+		log.Fatalf("Could not create scripts directory: %v", err)
+	}
+
 	ln, err := net.Listen("tcp4", "127.0.0.1:"+PORT_IDE)
 	if err != nil {
 		log.Fatalf("Could not listen on IDE's port: %v", err)
@@ -58,24 +80,72 @@ func handleIDEConnection(conn net.Conn) {
 
 	log.Printf("Started handling connection from %s", conn.RemoteAddr().String())
 
-	scanner := bufio.NewScanner(conn)
-	for scanner.Scan() {
-		line := scanner.Text()
-		log.Printf("Received: %s", line)
-		if len(strings.TrimSpace(line)) == 0 {
+	jsonDec := json.NewDecoder(conn)
+
+	for {
+		var rawMessage json.RawMessage
+		err := jsonDec.Decode(&rawMessage)
+		if err != nil {
+			if err == io.EOF {
+				log.Print("Connection closed by Tabletop")
+			} else {
+				log.Printf("Could not decode message: %v", err)
+			}
+			return
+		}
+
+		log.Printf("[TTS RAW MESSAGE] %v", string(rawMessage))
+
+		var message TTSMessage
+		err = json.Unmarshal(rawMessage, &message)
+		if err != nil {
+			log.Printf("Could not unmarshal message into TTS format: %v", err)
 			continue
 		}
 
-		var msg TTSMessage
-		if err := json.Unmarshal([]byte(line), &msg); err != nil {
-			log.Printf("Could not unmarshal line '%s' as message: %v", line, err)
+		log.Printf("[TTS MESSAGE] %+v", message)
+		handleTTSMessage(&message)
+	}
+}
+
+func handleTTSMessage(message *TTSMessage) {
+	if message == nil {
+		log.Println("TTS message was nil")
+		return
+	}
+
+	switch message.MessageID {
+	case MESSAGE_TYPE_NEW_OBJECT, MESSAGE_TYPE_LOAD_GAME:
+		log.Print("New game or new object message received")
+		createOrUpdateLuaFiles(message.ScriptStates)
+	}
+}
+
+func createOrUpdateLuaFiles(luaScripts []*ScriptState) {
+	for _, luaScript := range luaScripts {
+		filename := objectDataToFilename(luaScript)
+		log.Printf("Creating or updating lua file %s", filename)
+
+		luaFilepath := filepath.Join(scriptsDir, filename+".lua")
+		log.Printf("Attempting to create file at filepath: %s", luaFilepath)
+		file, err := os.Create(luaFilepath)
+		if err != nil {
+			log.Printf("Could not create or update file '%s': %v", filename, err)
 			continue
 		}
 
-		log.Printf("[TTS MESSAGE] %v", msg)
-	}
+		_, err = file.WriteString(luaScript.Script)
+		if err != nil {
+			log.Printf("Could not write script data to file '%s': %v", filename, err)
+		}
 
-	if err := scanner.Err(); err != nil {
-		log.Printf("Scanner error: %v", err)
+		err = file.Close()
+		if err != nil {
+			log.Printf("Could not close file '%s': %v", filename, err)
+		}
 	}
+}
+
+func objectDataToFilename(scriptState *ScriptState) string {
+	return fmt.Sprintf("%s_%s", scriptState.Name, scriptState.GUID)
 }
