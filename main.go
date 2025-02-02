@@ -109,6 +109,8 @@ func startRESTAPI() {
 			return
 		}
 
+		defer ttsConn.Close()
+
 		ideMessage := IDEMessage{
 			MessageID: requestBody.Operation,
 		}
