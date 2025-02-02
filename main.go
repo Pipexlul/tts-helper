@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type IDEMessageObjectScript struct {
@@ -17,10 +19,9 @@ type IDEMessageObjectScript struct {
 }
 
 type IDEMessage struct {
-	MessageID     int                     `json:"messageID"`
-	ScriptStates  []*ScriptState          `json:"scriptStates,omitempty"`
-	CustomMessage string                  `json:"customMessage,omitempty"`
-	ObjectScript  *IDEMessageObjectScript `json:",omitempty,inline"`
+	MessageID     int            `json:"messageID"`
+	ScriptStates  []*ScriptState `json:"scriptStates,omitempty"`
+	CustomMessage string         `json:"customMessage,omitempty"`
 }
 
 type TTSMessage struct {
@@ -34,10 +35,10 @@ type SendDataBody struct {
 }
 
 type ScriptState struct {
-	Name   string  `json:"name"`
-	GUID   string  `json:"guid"`
-	Script string  `json:"script"`
-	UI     *string `json:"ui,omitempty"`
+	Name   string `json:"name"`
+	GUID   string `json:"guid"`
+	Script string `json:"script,omitempty"`
+	UI     string `json:"ui,omitempty"`
 }
 
 const (
@@ -102,18 +103,31 @@ func startRESTAPI() {
 			return
 		}
 
+		var ideMessage IDEMessage
+
+		if requestBody.Operation < IDE_MESSAGE_GET_ALL || requestBody.Operation > IDE_MESSAGE_EXEC_LUA_CODE {
+			http.Error(w, "Invalid operation", http.StatusBadRequest)
+			return
+		}
+		ideMessage.MessageID = requestBody.Operation
+
+		switch ideMessage.MessageID {
+		case IDE_MESSAGE_GET_ALL:
+		case IDE_MESSAGE_SEND_SCRIPT_DATA:
+			ideMessage.ScriptStates = convertFileDataToScriptStates()
+		default:
+			http.Error(w, "Invalid operation", http.StatusBadRequest)
+			return
+		}
+
 		ttsConn, err := net.Dial("tcp4", "127.0.0.1:"+TTS_PORT)
 		if err != nil {
 			log.Printf("Could not open connection to TTS: %v", err)
 			http.Error(w, "Could not open connection to TTS", http.StatusInternalServerError)
 			return
 		}
-
 		defer ttsConn.Close()
 
-		ideMessage := IDEMessage{
-			MessageID: requestBody.Operation,
-		}
 		ideMessageBytes, err := json.Marshal(ideMessage)
 		if err != nil {
 			log.Printf("Failed to serialize message: %v", err)
@@ -248,17 +262,13 @@ func createOrUpdateScriptFiles(scriptFiles []*ScriptState) {
 		}
 
 		// XML
-		if scriptFile.UI == nil || *scriptFile.UI == "" {
-			continue
-		}
-
 		file, err = os.Create(xmlFilepath)
 		if err != nil {
 			log.Printf("Could not create or update file '%s': %v", filename, err)
 			continue
 		}
 
-		_, err = file.WriteString(*scriptFile.UI)
+		_, err = file.WriteString(scriptFile.UI)
 		if err != nil {
 			log.Printf("Could not write UI data to file '%s': %v", filename, err)
 		}
@@ -270,6 +280,79 @@ func createOrUpdateScriptFiles(scriptFiles []*ScriptState) {
 	}
 }
 
+func convertFileDataToScriptStates() []*ScriptState {
+	result := []*ScriptState{}
+
+	allFiles, err := os.ReadDir(scriptsDir)
+	if err != nil {
+		log.Printf("Could not read scripts directory: %v", err)
+		return result
+	}
+
+	allFiles = sliceFilter(allFiles, func(file fs.DirEntry) bool {
+		fileName := file.Name()
+		return !file.IsDir() && (strings.HasSuffix(fileName, ".lua") || strings.HasSuffix(fileName, ".xml"))
+	})
+
+	stateMap := make(map[string]*ScriptState)
+	for _, file := range allFiles {
+		name, guid, isLua := extractNameGUIDAndTypeFromFileName(file.Name())
+		if guid == "" {
+			log.Printf("Could not parse filename '%s' into name and guid", file.Name())
+			continue
+		}
+
+		if _, found := stateMap[guid]; !found {
+			stateMap[guid] = &ScriptState{
+				Name: name,
+				GUID: guid,
+			}
+		}
+
+		fileContents, err := os.ReadFile(filepath.Join(scriptsDir, file.Name()))
+		if err != nil {
+			log.Printf("Could not read file '%s': %v", file.Name(), err)
+			continue
+		}
+
+		strContents := string(fileContents)
+
+		if isLua {
+			stateMap[guid].Script = strContents
+		} else {
+			stateMap[guid].UI = strContents
+		}
+	}
+
+	for _, scriptState := range stateMap {
+		result = append(result, scriptState)
+	}
+
+	return result
+}
+
 func objectDataToFilename(scriptState *ScriptState) string {
 	return fmt.Sprintf("%s_%s", scriptState.Name, scriptState.GUID)
+}
+
+func sliceFilter[T any](slice []T, filterFunc func(T) bool) []T {
+	result := []T{}
+	for _, item := range slice {
+		if filterFunc(item) {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func extractNameGUIDAndTypeFromFileName(filename string) (string, string, bool) {
+	extension := filepath.Ext(filename)
+	isLua := extension == ".lua"
+	trimmedName := strings.TrimSuffix(filename, extension)
+
+	index := strings.LastIndex(trimmedName, "_")
+	if index == -1 {
+		return trimmedName, "", isLua
+	}
+	return trimmedName[:index], trimmedName[index+1:], isLua
 }
